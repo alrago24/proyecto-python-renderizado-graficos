@@ -10,20 +10,7 @@ from analisis import (
 )
 
 # ─────────────────────────────────────────────
-# Carga de DataFrames limpios
-# ─────────────────────────────────────────────
-
-calificaciones = calificaciones_limpias()
-estudiantes    = estudiantes_limpios()
-cursos         = cursos_limpios()
-asistencias    = asistencias_limpias()
-profesores     = profesores_limpios()
-usuarios       = usuarios_limpios()
-perfiles       = perfiles_limpios()
-
-
-# ─────────────────────────────────────────────
-# Merges
+# Merges (Loaded Dynamically for Real-Time Sync)
 # ─────────────────────────────────────────────
 
 def notas_por_curso() -> pd.DataFrame:
@@ -32,6 +19,9 @@ def notas_por_curso() -> pd.DataFrame:
     FK: calificaciones.estudianteId -> estudiantes.id
     FK: calificaciones.cursoId      -> cursos.id
     """
+    calificaciones = calificaciones_limpias()
+    estudiantes    = estudiantes_limpios()
+    cursos         = cursos_limpios()
     base = pd.merge(
         calificaciones,
         estudiantes,
@@ -56,6 +46,8 @@ def asistencia_vs_nota() -> pd.DataFrame:
     FK: asistencias.estudianteId = calificaciones.estudianteId
     FK: asistencias.cursoId      = calificaciones.cursoId
     """
+    asistencias    = asistencias_limpias()
+    calificaciones = calificaciones_limpias()
     asistencia_pct = (
         asistencias
         .groupby(["estudianteId", "cursoId"])["presente"]
@@ -76,6 +68,9 @@ def rendimiento_por_profesor() -> pd.DataFrame:
     FK: cursos.nombreProfesor -> profesores.nombreCompleto
     FK: calificaciones.cursoId -> cursos.id
     """
+    cursos         = cursos_limpios()
+    profesores     = profesores_limpios()
+    calificaciones = calificaciones_limpias()
     base = pd.merge(
         cursos,
         profesores,
@@ -103,6 +98,9 @@ def tendencia_asistencia(frecuencia: str = "W") -> pd.DataFrame:
     Args:
         frecuencia: 'W' semanal, 'M' mensual, 'D' diario (default 'W')
     """
+    asistencias    = asistencias_limpias()
+    cursos         = cursos_limpios()
+    estudiantes    = estudiantes_limpios()
     base = pd.merge(
         asistencias,
         cursos,
@@ -133,6 +131,11 @@ def perfil_estudiante(estudiante_id: int = None) -> pd.DataFrame:
     Args:
         estudiante_id: si se pasa, filtra un solo alumno; si no, retorna todos.
     """
+    calificaciones = calificaciones_limpias()
+    asistencias    = asistencias_limpias()
+    estudiantes    = estudiantes_limpios()
+    usuarios       = usuarios_limpios()
+    perfiles       = perfiles_limpios()
     notas = (
         calificaciones
         .groupby("estudianteId")["nota"]
@@ -185,6 +188,9 @@ def estudiantes_por_profesor() -> pd.DataFrame:
     FK: cursos.nombreProfesor  -> profesores.nombreCompleto
     FK: estudiantes.cursos     -> cursos.nombre
     """
+    profesores     = profesores_limpios()
+    cursos         = cursos_limpios()
+    estudiantes    = estudiantes_limpios()
     base = pd.merge(
         profesores,
         cursos,
@@ -208,6 +214,8 @@ def cursos_por_profesor() -> pd.DataFrame:
     Relaciona cada profesor con los cursos que imparte.
     FK: cursos.nombreProfesor -> profesores.nombreCompleto
     """
+    profesores     = profesores_limpios()
+    cursos         = cursos_limpios()
     return pd.merge(
         profesores,
         cursos,
@@ -224,6 +232,8 @@ def cursos_por_estudiante() -> pd.DataFrame:
     FK: estudiantes.cursos -> cursos.nombre
     """
     import ast
+    estudiantes    = estudiantes_limpios()
+    cursos         = cursos_limpios()
 
     df = estudiantes.copy()
     df["cursos"] = df["cursos"].apply(
@@ -243,29 +253,71 @@ def cursos_por_estudiante() -> pd.DataFrame:
 
 def cursos_con_mas_estudiantes() -> pd.DataFrame:
     """
-    Cuenta cuántos estudiantes están matriculados en cada curso,
-    ordenado de mayor a menor.
-    FK: estudiantes.cursos -> cursos.nombre
+    Cuenta cuántos estudiantes están asociados a cada curso,
+    combinando matrícula formal (campo cursos), calificaciones
+    y asistencias para reflejar datos en tiempo real.
+    Ordenado de mayor a menor.
     """
     import ast
+    estudiantes    = estudiantes_limpios()
+    cursos         = cursos_limpios()
+    calificaciones = calificaciones_limpias()
+    asistencias    = asistencias_limpias()
 
-    df = estudiantes.copy()
-    df["cursos"] = df["cursos"].apply(
+    # Mapeo curso id → nombre para las fuentes 2 y 3
+    curso_id_nombre = cursos[["id", "nombre"]].copy()
+
+    pares = []  # DataFrames con columnas [est_id, curso_nombre]
+
+    # ── Fuente 1: Matrícula formal (campo "cursos" del estudiante) ──
+    est = estudiantes.copy()
+    est["cursos"] = est["cursos"].apply(
         lambda x: ast.literal_eval(x) if isinstance(x, str) else x
     )
-    df = df.explode("cursos")
+    est = est.explode("cursos").dropna(subset=["cursos"])
+    if not est.empty:
+        pares.append(
+            est[["id", "cursos"]]
+            .rename(columns={"id": "est_id", "cursos": "curso_nombre"})
+        )
 
-    base = pd.merge(
-        df,
-        cursos,
-        left_on="cursos",
-        right_on="nombre",
-        how="left",
-        suffixes=("_est", "_cur"),
-    )
+    # ── Fuente 2: Calificaciones registradas ──
+    if not calificaciones.empty and "estudianteId" in calificaciones.columns and "cursoId" in calificaciones.columns:
+        cal = (
+            calificaciones[["estudianteId", "cursoId"]]
+            .drop_duplicates()
+            .merge(curso_id_nombre, left_on="cursoId", right_on="id", how="inner")
+        )
+        if not cal.empty:
+            pares.append(
+                cal[["estudianteId", "nombre"]]
+                .rename(columns={"estudianteId": "est_id", "nombre": "curso_nombre"})
+            )
+
+    # ── Fuente 3: Asistencias registradas ──
+    if not asistencias.empty and "estudianteId" in asistencias.columns and "cursoId" in asistencias.columns:
+        asi = (
+            asistencias[["estudianteId", "cursoId"]]
+            .drop_duplicates()
+            .merge(curso_id_nombre, left_on="cursoId", right_on="id", how="inner")
+        )
+        if not asi.empty:
+            pares.append(
+                asi[["estudianteId", "nombre"]]
+                .rename(columns={"estudianteId": "est_id", "nombre": "curso_nombre"})
+            )
+
+    # Si no hay datos de ninguna fuente
+    if not pares:
+        return pd.DataFrame(columns=["nombre", "total_estudiantes"])
+
+    # Unión de todas las fuentes sin duplicados
+    todos = pd.concat(pares, ignore_index=True).drop_duplicates()
+
     return (
-        base.groupby("nombre")["id_est"]
-        .count()
-        .reset_index(name="total_estudiantes")
+        todos.groupby("curso_nombre")["est_id"]
+        .nunique()
+        .reset_index()
+        .rename(columns={"curso_nombre": "nombre", "est_id": "total_estudiantes"})
         .sort_values("total_estudiantes", ascending=False)
     )

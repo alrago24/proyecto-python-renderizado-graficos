@@ -69,9 +69,9 @@ def limpiar_cursos(df: pd.DataFrame) -> pd.DataFrame:
     # Descartar registros sin identificador
     if "id" in df.columns:
         df = df.dropna(subset=["id"])
-    # Normalizar nombre a título si existe
+    # Normalizar nombre (quitar espacios innecesarios)
     if "nombre" in df.columns:
-        df["nombre"] = df["nombre"].str.title()
+        df["nombre"] = df["nombre"].str.strip()
     if "descripcion" in df.columns:
         df["descripcion"] = df["descripcion"].str.strip()
     return df.reset_index(drop=True)
